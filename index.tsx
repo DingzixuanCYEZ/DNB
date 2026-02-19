@@ -160,7 +160,7 @@ const styles = `
   .xp-bar-fill {
     height: 100%;
     background: linear-gradient(90deg, #3b82f6, #06b6d4);
-    transition: width 0.5s ease-out;
+    transition: width 2.0s ease-out;
   }
 
   .xp-text {
@@ -1061,6 +1061,7 @@ const Game = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [sequence, setSequence] = useState<GameStep[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
+  const currentIndexRef = useRef(-1);
   const [totalGameTrials, setTotalGameTrials] = useState(0);
   
   const [dynamicInterval, setDynamicInterval] = useState(DEFAULT_INTERVAL);
@@ -1125,6 +1126,7 @@ const Game = () => {
 
   // Analysis state
   const [searchN, setSearchN] = useState<string>('');
+  const [searchType, setSearchType] = useState<'all' | 'fixed' | 'variable'>('all');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1137,6 +1139,8 @@ const Game = () => {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioBuffersRef = useRef<Map<string, AudioBuffer>>(new Map());
   const inputsRef = useRef({ audio: false, visual: false });
+  const prevTrialInputsRef = useRef({ audio: false, visual: false });
+  const currentTrialStartTimeRef = useRef<number>(0);
 
   // --- Effects for Auto-Saving ---
   
@@ -1294,6 +1298,7 @@ const Game = () => {
     const newSeq = generateSequence(trials, n, useCenter, isVariable, currentWeights);
     setSequence(newSeq);
     setCurrentIndex(-1);
+    currentIndexRef.current = -1;
     setIsPlaying(true);
     setShowSummary(false);
     
@@ -1537,7 +1542,10 @@ const Game = () => {
     }
 
     setCurrentIndex(idx);
+    currentIndexRef.current = idx;
+    prevTrialInputsRef.current = { ...inputsRef.current };
     inputsRef.current = { audio: false, visual: false };
+    currentTrialStartTimeRef.current = Date.now();
     
     const step = seq[idx];
     
@@ -1649,12 +1657,67 @@ const Game = () => {
   const handleInput = useCallback((type: 'audio' | 'visual') => {
     if (!isPlaying) return;
     
-    const currentStep = sequence[currentIndex];
+    // Grace Period Logic (0.2s)
+    const now = Date.now();
+    const idx = currentIndexRef.current;
+
+    if (now - currentTrialStartTimeRef.current < 200 && idx > 0) {
+        const prevIdx = idx - 1;
+        const prevStep = sequence[prevIdx];
+        const prevEffectiveN = isVariable ? prevStep.nBack : n;
+        
+        if (prevIdx >= prevEffectiveN) {
+            const prevNBackStep = sequence[prevIdx - prevEffectiveN];
+            
+            // Check if user ALREADY pressed for previous trial
+            const alreadyPressed = type === 'audio' ? prevTrialInputsRef.current.audio : prevTrialInputsRef.current.visual;
+            
+            if (!alreadyPressed) {
+                // Determine if previous trial was a match
+                let isMatch = false;
+                if (type === 'audio') isMatch = prevStep.letter === prevNBackStep.letter;
+                else isMatch = prevStep.position === prevNBackStep.position;
+                
+                if (isMatch) {
+                    // It was a match, but user missed it. Convert Miss to Hit.
+                    if (type === 'audio') {
+                        scoreRef.current.audio.misses--;
+                        scoreRef.current.audio.hits++;
+                        if (showFeedback) setAudioFeedback('correct');
+                        prevTrialInputsRef.current.audio = true;
+                    } else {
+                        scoreRef.current.visual.misses--;
+                        scoreRef.current.visual.hits++;
+                        if (showFeedback) setVisualFeedback('correct');
+                        prevTrialInputsRef.current.visual = true;
+                    }
+                    return; 
+                } else {
+                    // It was NOT a match. User didn't press (Correct Rejection).
+                    // Now they press late -> False Alarm.
+                    if (type === 'audio') {
+                        scoreRef.current.audio.correctRejections--;
+                        scoreRef.current.audio.falseAlarms++;
+                        if (showFeedback) setAudioFeedback('wrong');
+                        prevTrialInputsRef.current.audio = true;
+                    } else {
+                        scoreRef.current.visual.correctRejections--;
+                        scoreRef.current.visual.falseAlarms++;
+                        if (showFeedback) setVisualFeedback('wrong');
+                        prevTrialInputsRef.current.visual = true;
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    const currentStep = sequence[idx];
     const effectiveN = isVariable ? currentStep.nBack : n;
     
-    if (currentIndex < effectiveN) return; 
+    if (idx < effectiveN) return; 
     
-    const nBackStep = sequence[currentIndex - effectiveN];
+    const nBackStep = sequence[idx - effectiveN];
     
     if (type === 'audio') {
       if (inputsRef.current.audio) return;
@@ -1673,7 +1736,7 @@ const Game = () => {
         setVisualFeedback(isMatch ? 'correct' : 'wrong');
       }
     }
-  }, [isPlaying, currentIndex, n, sequence, isVariable, showFeedback]);
+  }, [isPlaying, n, sequence, isVariable, showFeedback]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1818,6 +1881,14 @@ const Game = () => {
   // Calculate filtered history for display and chart
   const filteredHistory = useMemo(() => {
      let data = history;
+     
+     // Filter by type
+     if (searchType === 'fixed') {
+         data = data.filter(h => !h.isVariable);
+     } else if (searchType === 'variable') {
+         data = data.filter(h => h.isVariable);
+     }
+
      const targetN = parseFloat(searchN);
      if (!isNaN(targetN) && searchN !== '') {
          data = data.filter(h => {
@@ -1829,7 +1900,7 @@ const Game = () => {
          });
      }
      return data;
-  }, [history, searchN]);
+  }, [history, searchN, searchType]);
 
   // History Grouping Logic
   const groupedHistory = useMemo(() => {
@@ -2294,13 +2365,62 @@ const Game = () => {
             <div style={{marginBottom: 16, background: '#f8fafc', padding: 12, borderRadius: 12, border: '1px solid #e2e8f0'}}>
                 <div style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8}}>
                     <Search size={16} color="#64748b" />
-                    <span style={{fontSize: '0.9rem', fontWeight: 600, color: '#475569'}}>筛选分析 (固定N)</span>
+                    <span style={{fontSize: '0.9rem', fontWeight: 600, color: '#475569'}}>筛选分析</span>
                 </div>
+                
+                <div style={{display: 'flex', gap: 8, marginBottom: 8}}>
+                    <button 
+                        onClick={() => setSearchType('all')}
+                        style={{
+                            padding: '4px 12px', 
+                            borderRadius: 6, 
+                            border: `1px solid ${searchType === 'all' ? '#3b82f6' : '#e2e8f0'}`,
+                            background: searchType === 'all' ? '#eff6ff' : '#fff',
+                            color: searchType === 'all' ? '#2563eb' : '#64748b',
+                            fontSize: '0.8rem',
+                            fontWeight: searchType === 'all' ? 600 : 400,
+                            cursor: 'pointer'
+                        }}
+                    >
+                        全部
+                    </button>
+                    <button 
+                        onClick={() => setSearchType('fixed')}
+                        style={{
+                            padding: '4px 12px', 
+                            borderRadius: 6, 
+                            border: `1px solid ${searchType === 'fixed' ? '#3b82f6' : '#e2e8f0'}`,
+                            background: searchType === 'fixed' ? '#eff6ff' : '#fff',
+                            color: searchType === 'fixed' ? '#2563eb' : '#64748b',
+                            fontSize: '0.8rem',
+                            fontWeight: searchType === 'fixed' ? 600 : 400,
+                            cursor: 'pointer'
+                        }}
+                    >
+                        固定N
+                    </button>
+                    <button 
+                        onClick={() => setSearchType('variable')}
+                        style={{
+                            padding: '4px 12px', 
+                            borderRadius: 6, 
+                            border: `1px solid ${searchType === 'variable' ? '#3b82f6' : '#e2e8f0'}`,
+                            background: searchType === 'variable' ? '#eff6ff' : '#fff',
+                            color: searchType === 'variable' ? '#2563eb' : '#64748b',
+                            fontSize: '0.8rem',
+                            fontWeight: searchType === 'variable' ? 600 : 400,
+                            cursor: 'pointer'
+                        }}
+                    >
+                        可变N
+                    </button>
+                </div>
+
                 <div style={{display: 'flex', gap: 10}}>
                     <input 
                        type="number" 
                        step="0.1"
-                       placeholder="输入N (如 2.5)" 
+                       placeholder={searchType === 'variable' ? "输入难度 (如 2.5)" : "输入N (如 2)"}
                        value={searchN}
                        onChange={e => setSearchN(e.target.value)}
                        style={{padding: '8px', borderRadius: 8, border: '1px solid #cbd5e1', width: '100%', fontSize: '0.9rem'}}
