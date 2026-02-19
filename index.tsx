@@ -1206,19 +1206,47 @@ const Game = () => {
        setVariableWeights(newWeights);
     }
 
+    // 在 useEffect 内部的 initAudio
     const initAudio = async () => {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtx) {
         audioContextRef.current = new AudioCtx();
+        
+        // 1. 先加载 silence.wav (你截图里有这个文件，这很好，用来解锁手机音频)
+        try {
+            const sRes = await fetch('/silence.wav');
+            if (sRes.ok) {
+                const sBuf = await sRes.arrayBuffer();
+                const sDecoded = await audioContextRef.current.decodeAudioData(sBuf);
+                audioBuffersRef.current.set('silence', sDecoded);
+            }
+        } catch(e) { console.warn("Silence load failed"); }
+
+        // 2. 加载字母音频
         for (const letter of LETTERS) {
           try {
-            const response = await fetch(`${letter}.wav`);
+            // [关键修改] 加上 '/' 强制从根目录 public 读取
+            // 加上时间戳 ?t=... 防止缓存旧的错误文件
+            const response = await fetch(`/${letter}.wav?t=${Date.now()}`);
+            
+            // [关键修改] 检查返回的是不是 HTML (如果是 HTML 说明路径错了，服务器返回了 404 页面)
+            const type = response.headers.get('Content-Type');
+            if (type && type.includes('text/html')) {
+                console.error(`❌ 文件 ${letter}.wav 返回了 HTML，请检查 public 文件夹！`);
+                continue;
+            }
+
             if (response.ok) {
               const arrayBuffer = await response.arrayBuffer();
               const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
               audioBuffersRef.current.set(letter, audioBuffer);
+              console.log(`✅ 加载成功: ${letter}`);
+            } else {
+              console.error(`❌ 加载失败: ${letter}.wav 状态码 ${response.status}`);
             }
-          } catch (e) {}
+          } catch (e) {
+            console.error(`⚠️ 解码错误 ${letter}:`, e);
+          }
         }
       }
     };
@@ -1257,37 +1285,24 @@ const Game = () => {
     
     startTimeRef.current = Date.now();
 
-    // Explicitly resume audio context on user interaction (start game)
+    // [关键修改] 移动端音频解锁逻辑
     if (audioContextRef.current) {
-      if (audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume();
-        // Give a tiny delay to ensure context is fully active
-        await new Promise(r => setTimeout(r, 50));
-      }
+      const ctx = audioContextRef.current;
       
-      // Warm up audio buffer to prevent first-sound cutoff
-      // Play a random letter at 0 volume to force mixer activation
+      // 1. 如果是挂起状态，恢复它
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+
+      // 2. [重要] 立即播放一个极短的静音或空声音
+      // 这告诉 iOS/Android：“用户刚才点击了，我有权播放声音了”
       try {
-        const randomLetter = LETTERS[Math.floor(Math.random() * LETTERS.length)];
-        const buffer = audioBuffersRef.current.get(randomLetter);
-        
-        if (buffer) {
-           const source = audioContextRef.current.createBufferSource();
-           source.buffer = buffer;
-           const gainNode = audioContextRef.current.createGain();
-           gainNode.gain.value = 0; // Muted
-           source.connect(gainNode);
-           gainNode.connect(audioContextRef.current.destination);
-           source.start(0);
-        } else {
-           // Fallback to empty buffer
-           const buffer = audioContextRef.current.createBuffer(1, 1, 22050);
-           const source = audioContextRef.current.createBufferSource();
-           source.buffer = buffer;
-           source.connect(audioContextRef.current.destination);
-           source.start(0);
-        }
-      } catch(e) {}
+          const buffer = audioBuffersRef.current.get('silence') || ctx.createBuffer(1, 1, 22050);
+          const source = ctx.createBufferSource();
+          source.buffer = buffer;
+          source.connect(ctx.destination);
+          source.start(0);
+      } catch(e) { console.error("Unlock failed", e); }
     }
     
     const trials = getRoundCount(n, roundMode, customRoundCount);
