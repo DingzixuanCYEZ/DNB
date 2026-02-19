@@ -1,0 +1,2399 @@
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Play, Square, Volume2, History, X, AlertCircle, Settings, Percent, Trophy, Scroll, Clock, Zap, Lock, Download, Upload, Smartphone, Monitor, Save, ChevronDown, ChevronRight, Calendar, Search, Activity, VolumeX, Volume1, Volume2 as VolumeIcon, Hash, Gauge, Hand } from 'lucide-react';
+
+// --- Constants & Types ---
+
+const LETTERS = ['c', 'h', 'k', 'l', 'q', 'r', 's', 't'];
+const GRID_SIZE = 9;
+const DEFAULT_N = 2;
+const BASE_ROUNDS = 20;
+const DEFAULT_INTERVAL = 3.0;
+const DEFAULT_DISPLAY_TIME = 0.5;
+
+const REALMS = ['', '锻体', '炼气', '筑基', '结丹', '元婴', '化神', '炼虚', '合体', '大乘', '渡劫'];
+const STAGES = ['前期', '前期巅峰', '中期', '中期巅峰', '后期', '后期巅峰', '圆满', '大圆满'];
+
+type RoundMode = 'standard' | 'linear' | 'custom';
+type PacingMode = 'standard' | 'self-paced' | 'dynamic';
+
+interface GameStep {
+  position: number;
+  letter: string;
+  nBack: number; 
+}
+
+interface ScoreDetail {
+  hits: number;    
+  misses: number;  
+  falseAlarms: number; 
+  correctRejections: number;
+}
+
+interface GameResult {
+  id: string;
+  timestamp: number;
+  n: number;
+  interval: number;
+  totalTrials: number;
+  audioScore: ScoreDetail;
+  visualScore: ScoreDetail;
+  isVariable: boolean;
+  variableDifficulty?: number; 
+  score?: number; 
+  accuracy: number; // 0-100
+  device?: 'mobile' | 'desktop';
+  realmLevel?: number; // Snapshot of realm when game started
+  stage?: number; // Snapshot of stage when game started
+  afterRealmLevel?: number; // Snapshot after game
+  afterStage?: number; // Snapshot after game
+  pacingMode?: PacingMode;
+}
+
+interface CultivationState {
+  realmLevel: number; 
+  stage: number; 
+  currentXP: number;
+  recentScores: number[]; 
+  totalStudyTime: number; 
+  stageStudyTime: number;
+  totalSessions: number; // Cumulative total games played
+  stageSessions: number; // Games played in current stage
+}
+
+interface Milestone {
+  id: string;
+  timestamp: number;
+  type: 'minor' | 'major' | 'peak';
+  title: string;
+  description: string;
+  stageDuration?: number;
+  totalDuration?: number;
+  stageSessions?: number;
+  totalSessions?: number;
+}
+
+// --- Styles ---
+const styles = `
+  :root {
+    --grid-border: #e5e7eb;
+    --active-color: #3b82f6;
+    --cultivation-bg: #f0f9ff;
+    --cultivation-border: #bae6fd;
+    --cultivation-text: #0369a1;
+  }
+  html {
+    height: auto;
+    min-height: 100%;
+  }
+  body {
+    background-color: #f8fafc;
+    color: #1e293b;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    min-height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+  .app-container {
+    width: 100%;
+    min-height: 100vh; 
+    display: flex;
+    flex-direction: column;
+    padding: 10px;
+    box-sizing: border-box;
+  }
+  
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 4px 10px;
+    flex-shrink: 0;
+    width: 100%;
+    max-width: 600px;
+    align-self: center;
+  }
+  
+  /* Cultivation Panel */
+  .cultivation-card {
+    background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+    border: 1px solid #bae6fd;
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 20px;
+    width: 100%;
+    max-width: 600px;
+    align-self: center;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  }
+
+  .realm-title {
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: #0c4a6e;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .cultivation-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 0.85rem;
+    color: #0369a1;
+    margin-bottom: 12px;
+  }
+
+  .xp-bar-container {
+    height: 10px;
+    background: #e2e8f0; 
+    border-radius: 5px;
+    overflow: hidden;
+    position: relative;
+    margin-top: 8px;
+  }
+
+  .xp-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6, #06b6d4);
+    transition: width 0.5s ease-out;
+  }
+
+  .xp-text {
+    font-size: 0.75rem;
+    color: #64748b;
+    margin-top: 4px;
+    text-align: right;
+  }
+
+  .bottleneck-info {
+    background: rgba(255, 255, 255, 0.6);
+    border: 1px solid #bae6fd;
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 10px;
+    font-size: 0.85rem;
+  }
+
+  .game-area {
+    margin: auto 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    padding-bottom: 60px; 
+  }
+
+  /* Landscape Mode Optimization */
+  @media (min-aspect-ratio: 1/1) and (max-height: 600px) {
+    .app-container { flex-direction: row; align-items: center; justify-content: center; min-height: 100%; }
+    .header { position: absolute; top: 10px; left: 10px; width: auto; flex-direction: row; padding: 0; gap: 10px; }
+    .cultivation-card {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 280px;
+      margin: 0;
+      padding: 10px;
+      z-index: 10;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .game-area { 
+      margin: 0;
+      flex-direction: row; 
+      gap: 30px; 
+      justify-content: center; 
+      align-items: center;
+      padding-bottom: 0;
+      height: auto;
+      width: auto;
+    }
+    .control-panel { 
+      flex-direction: column !important; 
+      margin-top: 0 !important; 
+      gap: 16px !important; 
+    }
+    .match-btn { width: 110px !important; padding: 10px !important; height: auto; }
+    
+    .settings-container {
+      position: absolute;
+      right: 20px;
+      bottom: 20px;
+      top: auto;
+      transform: none;
+      width: 280px;
+      max-height: 40vh;
+      overflow-y: auto;
+      z-index: 20;
+    }
+  }
+
+  @media (max-aspect-ratio: 1/1) {
+    .settings-container {
+      width: 100%;
+      max-width: 500px;
+      margin-top: 24px;
+    }
+  }
+
+  /* Grid Board */
+  .grid-board {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+    background-color: #cbd5e1; 
+    gap: 1px;
+    border: 1px solid #cbd5e1;
+    width: min(92vmin, 500px);
+    height: min(92vmin, 500px);
+    flex-shrink: 0;
+    position: relative;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+  }
+
+  .grid-cell {
+    background-color: #ffffff;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden; 
+  }
+  
+  .active-block {
+    width: 92%;
+    height: 92%;
+    background-color: var(--active-color);
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    transition: transform 0.1s;
+  }
+
+  /* Improved Cross Styling - Centered */
+  .disabled-cross {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  .disabled-cross::before, .disabled-cross::after {
+    content: '';
+    position: absolute;
+    background-color: #f1f5f9;
+    border-radius: 2px;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  .disabled-cross::before { width: 60%; height: 2px; }
+  .disabled-cross::after { height: 60%; width: 2px; }
+
+  .center-number {
+    font-size: min(15vmin, 70px);
+    font-weight: 800;
+    color: #0f172a;
+    user-select: none;
+    line-height: 1;
+    position: absolute; 
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 5;
+  }
+
+  .game-config-display {
+    width: min(92vmin, 500px);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    font-size: 0.85rem;
+    color: #64748b;
+    font-family: monospace;
+    font-weight: 600;
+  }
+
+  .progress-info {
+    width: min(92vmin, 500px);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    font-size: 0.9rem;
+    color: #64748b;
+    font-weight: 500;
+  }
+  
+  .progress-bar-bg {
+    flex: 1;
+    height: 8px;
+    background: #e2e8f0;
+    border-radius: 4px;
+    margin-right: 12px;
+    overflow: hidden;
+  }
+  
+  .progress-bar-fill {
+    height: 100%;
+    background: #3b82f6;
+    transition: width 0.3s linear;
+  }
+
+  .control-panel {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    margin-top: 24px;
+    flex-shrink: 0;
+    z-index: 10;
+  }
+
+  .match-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100px;
+    padding: 12px 8px;
+    background-color: #ffffff;
+    border: 2px solid #e2e8f0;
+    border-radius: 12px;
+    cursor: pointer;
+    user-select: none;
+    touch-action: manipulation;
+  }
+  
+  .match-btn:active, .match-btn.pressed {
+    background-color: #f1f5f9;
+    border-color: #94a3b8;
+    transform: translateY(2px);
+  }
+  
+  .match-btn.correct { border-color: #22c55e; background-color: #dcfce7; }
+  .match-btn.wrong { border-color: #ef4444; background-color: #fee2e2; }
+
+  .btn {
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-primary { background-color: #3b82f6; color: white; }
+  .btn-secondary { background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+  .btn-danger { background-color: #ef4444; color: white; }
+  .btn-ghost { background-color: transparent; color: #64748b; padding: 8px; }
+  .btn.active { background-color: #e0f2fe; color: #0284c7; border-color: #7dd3fc; }
+  
+  .play-btn-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 80px;
+  }
+
+  .settings-container {
+    background: #ffffff;
+    padding: 20px;
+    border-radius: 16px;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  }
+
+  .setting-section {
+    margin-bottom: 20px;
+    border-bottom: 1px solid #f1f5f9;
+    padding-bottom: 16px;
+  }
+  .setting-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+  .setting-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  
+  .input-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  
+  .val-display {
+    font-size: 1.1rem;
+    font-weight: 700;
+    min-width: 36px;
+    text-align: center;
+  }
+  
+  .val-input {
+    font-size: 1.1rem;
+    font-weight: 700;
+    width: 60px;
+    text-align: center;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 4px;
+    background: #f8fafc;
+  }
+
+  .toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+  }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: #cbd5e1;
+    transition: .4s;
+    border-radius: 34px;
+  }
+  .slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: .4s;
+    border-radius: 50%;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  }
+  input:checked + .slider { background-color: #3b82f6; }
+  input:checked + .slider:before { transform: translateX(20px); }
+
+  .prob-input {
+    width: 44px;
+    padding: 6px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    text-align: center;
+    font-size: 0.9rem;
+  }
+
+  .round-mode-selector {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .round-mode-btn {
+    flex: 1;
+    padding: 8px 4px;
+    font-size: 0.8rem;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    background: #f8fafc;
+    color: #64748b;
+    cursor: pointer;
+  }
+  .round-mode-btn.active {
+    background: #eff6ff;
+    border-color: #3b82f6;
+    color: #2563eb;
+    font-weight: 600;
+  }
+  
+  .volume-slider-container {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex: 1;
+      justify-content: flex-end;
+  }
+  .volume-slider {
+      width: 100px;
+      height: 4px;
+      background: #cbd5e1;
+      border-radius: 2px;
+      appearance: none;
+      outline: none;
+  }
+  .volume-slider::-webkit-slider-thumb {
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #3b82f6;
+      cursor: pointer;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(15, 23, 42, 0.6);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 50;
+    padding: 20px;
+  }
+  .modal {
+    background: #ffffff;
+    padding: 24px;
+    border-radius: 16px;
+    max-width: 500px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  
+  .summary-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    margin-top: 16px;
+  }
+  .summary-item {
+    background: #f8fafc;
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+  }
+  
+  .stats-table {
+    width: 100%;
+    font-size: 0.85rem;
+    border-collapse: collapse;
+    margin-top: 8px;
+  }
+  .stats-table td {
+    padding: 4px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .stats-table tr:last-child td { border-bottom: none; }
+  .stat-label { color: #64748b; }
+  .stat-val { font-weight: 600; text-align: right; }
+  
+  .text-success { color: #16a34a; font-weight: bold; }
+  
+  /* Milestones */
+  .milestone-item {
+    padding: 12px;
+    border-left: 3px solid #cbd5e1;
+    background: #f8fafc;
+    margin-bottom: 10px;
+    border-radius: 0 8px 8px 0;
+  }
+  .milestone-item.major { border-left-color: #f59e0b; background: #fffbeb; }
+  .milestone-item.peak { border-left-color: #3b82f6; background: #eff6ff; }
+  
+  .milestone-date {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .milestone-title {
+    font-weight: 700;
+    color: #0f172a;
+    font-size: 0.95rem;
+  }
+  .milestone-desc {
+    font-size: 0.85rem;
+    color: #475569;
+    margin-top: 4px;
+  }
+  .milestone-meta {
+    margin-top: 6px;
+    font-size: 0.75rem;
+    color: #64748b;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+  
+  /* Day Group */
+  .day-group {
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .day-header {
+    background: #f1f5f9;
+    padding: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+  }
+  .day-content {
+    background: #fff;
+    padding: 10px;
+    border-top: 1px solid #e2e8f0;
+  }
+  
+  /* Chart */
+  .chart-wrapper {
+    overflow-x: auto;
+    padding: 10px 0;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .chart-svg {
+    display: block;
+    margin: 0 auto;
+  }
+  .chart-tooltip {
+    font-size: 12px;
+    fill: #1e293b;
+    font-weight: 600;
+  }
+  .chart-grid-line {
+    stroke: #e2e8f0;
+    stroke-width: 1;
+    stroke-dasharray: 4 4;
+  }
+  
+  .data-list-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 4px;
+    border-bottom: 1px solid #f1f5f9;
+    font-size: 0.9rem;
+    color: #334155;
+  }
+  .data-list-row:last-child { border-bottom: none; }
+`;
+
+// --- Helpers ---
+
+function getProbabilityThresholds(weights: number[]) {
+  const sum = weights.reduce((a, b) => a + b, 0);
+  if (sum === 0) return weights.map(() => 0); 
+  let acc = 0;
+  return weights.map(w => {
+    acc += w / sum;
+    return acc;
+  });
+}
+
+function pickNFromWeights(thresholds: number[]): number {
+  const r = Math.random();
+  for (let i = 0; i < thresholds.length; i++) {
+    if (r < thresholds[i]) return i + 1; 
+  }
+  return thresholds.length;
+}
+
+function generateSequence(length: number, maxN: number, useCenter: boolean, isVariable: boolean, weights: number[]): GameStep[] {
+  const seq: GameStep[] = [];
+  const MATCH_RATE = 0.25;
+  const thresholds = getProbabilityThresholds(weights);
+  const centerIndex = 4;
+
+  for (let i = 0; i < length; i++) {
+    let currentN = maxN;
+    if (isVariable && i >= maxN) {
+       currentN = pickNFromWeights(thresholds);
+    }
+    
+    if (i < maxN) {
+      let pos = Math.floor(Math.random() * GRID_SIZE);
+      const forbiddenCenter = isVariable || !useCenter;
+      if (forbiddenCenter) {
+         const candidates = Array.from({length: GRID_SIZE}, (_, k) => k).filter(p => p !== centerIndex);
+         pos = candidates[Math.floor(Math.random() * candidates.length)];
+      }
+      seq.push({ position: pos, letter: LETTERS[Math.floor(Math.random() * LETTERS.length)], nBack: maxN });
+    } else {
+      const prevStep = seq[i - currentN];
+      let pos: number;
+      if (Math.random() < MATCH_RATE) {
+        pos = prevStep.position;
+      } else {
+        const forbiddenCenter = isVariable || !useCenter;
+        let candidates = Array.from({length: GRID_SIZE}, (_, k) => k).filter(p => p !== prevStep.position);
+        if (forbiddenCenter) {
+          candidates = candidates.filter(p => p !== centerIndex);
+        }
+        pos = candidates[Math.floor(Math.random() * candidates.length)];
+      }
+
+      let char: string;
+      if (Math.random() < MATCH_RATE) {
+        char = prevStep.letter;
+      } else {
+        const candidates = LETTERS.filter(l => l !== prevStep.letter);
+        char = candidates[Math.floor(Math.random() * candidates.length)];
+      }
+      seq.push({ position: pos, letter: char, nBack: currentN });
+    }
+  }
+  return seq;
+}
+
+function calculateAccuracy(hits: number, misses: number, falseAlarms: number): number {
+  const totalTargets = hits + misses;
+  const errors = misses + falseAlarms;
+  if (totalTargets === 0 && falseAlarms === 0) return 100;
+  if (totalTargets === 0) return 0;
+  const score = 1 - (errors / totalTargets);
+  return Math.max(0, parseFloat((score * 100).toFixed(1)));
+}
+
+function formatScore(score: number | undefined): string {
+  if (score === undefined) return '';
+  if (score >= 1000) return score.toFixed(0);
+  if (score >= 100) return score.toFixed(1);
+  return score.toFixed(2);
+}
+
+function formatDuration(seconds: number): string {
+  const m = (seconds / 60).toFixed(1);
+  return `${m}分钟`;
+}
+
+function formatDateTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).replace(/\//g, '/');
+}
+
+function formatDateForFilename(timestamp: number): string {
+  const d = new Date(timestamp);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const seconds = String(d.getSeconds()).padStart(2, '0');
+  return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
+
+function getDeviceType(): 'mobile' | 'desktop' {
+  // Use window width to determine device type for recording
+  return window.innerWidth < 768 ? 'mobile' : 'desktop';
+}
+
+function getRoundCount(nVal: number, mode: RoundMode, custom: number) {
+  if (mode === 'linear') return 20 + 4 * nVal;
+  if (mode === 'custom') return Math.max(1, custom);
+  return 20 + nVal * nVal; // standard
+}
+
+// Cultivation Logic
+
+function getMaxXP(realm: number, stage: number): number {
+  const base = Math.max(1, Math.sqrt(realm));
+  const power = Math.pow(10, realm);
+  
+  // Early (0) -> Peak
+  if (stage === 0) return Math.round(base * 4 * power);
+  // Mid (2) -> Peak
+  if (stage === 2) return Math.round(base * 8 * power);
+  // Late (4) -> Peak
+  if (stage === 4) return Math.round(base * 16 * power);
+  // Perfect (6) -> Great Perfect. Max is Next Realm Early Cap.
+  if (stage === 6) {
+     const nextRealm = realm + 1;
+     const nextBase = Math.max(1, Math.sqrt(nextRealm));
+     const nextPower = Math.pow(10, nextRealm);
+     return Math.round(nextBase * 4 * nextPower); 
+  }
+  
+  return 100; // Fallback
+}
+
+function getBreakthroughTarget(realm: number, stage: number): number {
+  const power = Math.pow(10, realm);
+  if (stage === 1) return 1 * power; // Early Peak -> Mid
+  if (stage === 3) return 2 * power; // Mid Peak -> Late
+  if (stage === 5) return 4 * power; // Late Peak -> Perfect
+  return 0;
+}
+
+function getFullStageName(realm: number, stage: number) {
+    if (realm === 0) return '凡人';
+    return `${REALMS[realm]}${STAGES[stage]}`;
+}
+
+// --- Components ---
+
+// History Day Group Component
+interface HistoryDayGroupProps {
+    dateStr: string;
+    records: GameResult[];
+    onToggle: () => void;
+    isExpanded: boolean;
+}
+
+const HistoryDayGroup: React.FC<HistoryDayGroupProps> = ({ 
+    dateStr, 
+    records, 
+    onToggle, 
+    isExpanded 
+}) => {
+    const totalDuration = records.reduce((acc, r) => acc + (r.totalTrials * r.interval), 0);
+    
+    // Determine Realm Change
+    const sorted = [...records].sort((a, b) => a.timestamp - b.timestamp);
+    const startRecord = sorted[0];
+    const endRecord = sorted[sorted.length - 1];
+    
+    let realmChangeText = "";
+    if (startRecord.realmLevel && endRecord.realmLevel && startRecord.stage !== undefined && endRecord.stage !== undefined) {
+        // Start is always state BEFORE the first game
+        const startName = getFullStageName(startRecord.realmLevel, startRecord.stage);
+        
+        // End is state AFTER the last game if available, otherwise fallback to BEFORE (legacy data)
+        const endRealm = endRecord.afterRealmLevel ?? endRecord.realmLevel ?? 0;
+        const endStage = endRecord.afterStage ?? endRecord.stage ?? 0;
+        
+        const endName = getFullStageName(endRealm, endStage);
+        
+        if (startName !== endName) {
+            realmChangeText = `${startName} -> ${endName}`;
+        } else {
+            realmChangeText = startName;
+        }
+    } else {
+        realmChangeText = "修炼记录";
+    }
+
+    return (
+        <div className="day-group">
+            <div className="day-header" onClick={onToggle} style={{cursor: 'pointer', userSelect: 'none'}}>
+                <div style={{display: 'flex', flexDirection: 'column', gap: 2}}>
+                    <div style={{fontWeight: 700, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6}}>
+                        <Calendar size={14} /> {dateStr}
+                    </div>
+                    <div style={{fontSize: '0.8rem', color: '#64748b'}}>
+                        时长: {formatDuration(totalDuration)} | {realmChangeText}
+                    </div>
+                </div>
+                {isExpanded ? <ChevronDown size={20} color="#94a3b8" /> : <ChevronRight size={20} color="#94a3b8" />}
+            </div>
+            {isExpanded && (
+                <div className="day-content">
+                    <div style={{display: 'flex', flexDirection: 'column', gap: 10}}>
+                        {records.map(run => (
+                            <div key={run.id} style={{padding: 12, border: '1px solid #e2e8f0', borderRadius: 10, background: '#f8fafc'}}>
+                                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: 6}}>
+                                    <span style={{fontWeight: 700, color: '#0f172a'}}>
+                                    {run.isVariable ? `Var N (${run.variableDifficulty})` : `N = ${run.n}`}
+                                    </span>
+                                    <span style={{fontSize: '0.75rem', color: '#64748b', display: 'flex', alignItems: 'center', gap: 6}}>
+                                    {run.device === 'mobile' ? '手机' : '电脑'} | {formatDateTime(run.timestamp)}
+                                    </span>
+                                </div>
+                                <div style={{marginBottom: 8}}>
+                                    <StatsTable visual={run.visualScore} audio={run.audioScore} />
+                                </div>
+                                {run.score !== undefined && (
+                                    <div style={{textAlign: 'right', fontWeight: 700, color: '#ea580c', fontSize: '0.9rem'}}>
+                                    +{formatScore(run.score)} 经验
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+const StatsTable = ({ visual, audio }: { visual: ScoreDetail, audio: ScoreDetail }) => {
+    const vAcc = calculateAccuracy(visual.hits, visual.misses, visual.falseAlarms);
+    const aAcc = calculateAccuracy(audio.hits, audio.misses, audio.falseAlarms);
+    const tHits = visual.hits + audio.hits;
+    const tMiss = visual.misses + audio.misses;
+    const tFalse = visual.falseAlarms + audio.falseAlarms;
+    const tAcc = calculateAccuracy(tHits, tMiss, tFalse);
+    
+    return (
+      <table className="stats-table">
+        <thead>
+          <tr style={{color: '#64748b', borderBottom: '2px solid #e2e8f0'}}>
+            <th style={{textAlign: 'left', paddingBottom: 6}}>类型</th>
+            <th style={{textAlign: 'right', paddingBottom: 6}}>总匹配</th>
+            <th style={{textAlign: 'right', paddingBottom: 6}}>漏按</th>
+            <th style={{textAlign: 'right', paddingBottom: 6}}>多按</th>
+            <th style={{textAlign: 'right', paddingBottom: 6}}>准确率</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style={{fontWeight: 600}}>位置</td>
+            <td className="stat-val">{visual.hits + visual.misses}</td>
+            <td className="stat-val">{visual.misses}</td>
+            <td className="stat-val">{visual.falseAlarms}</td>
+            <td className="stat-val">{vAcc}%</td>
+          </tr>
+          <tr>
+            <td style={{fontWeight: 600}}>声音</td>
+            <td className="stat-val">{audio.hits + audio.misses}</td>
+            <td className="stat-val">{audio.misses}</td>
+            <td className="stat-val">{audio.falseAlarms}</td>
+            <td className="stat-val">{aAcc}%</td>
+          </tr>
+          <tr style={{background: '#f1f5f9'}}>
+            <td style={{fontWeight: 800}}>综合</td>
+            <td className="stat-val">{(visual.hits + visual.misses) + (audio.hits + audio.misses)}</td>
+            <td className="stat-val">{tMiss}</td>
+            <td className="stat-val">{tFalse}</td>
+            <td className="stat-val" style={{color: '#3b82f6'}}>{tAcc}%</td>
+          </tr>
+        </tbody>
+      </table>
+    );
+};
+
+// Line Chart Component
+const LineChart = ({ data }: { data: { day: string; avgAcc: number }[] }) => {
+    const height = 150;
+    const padding = 20;
+    const pointWidth = 50; 
+    const width = Math.max(300, data.length * pointWidth); // Ensure min width and dynamic scaling
+    
+    if (data.length === 0) return null;
+
+    // Y scale: 0 to 100 fixed
+    const getY = (val: number) => height - padding - (val / 100) * (height - 2 * padding);
+    
+    // X scale
+    const getX = (index: number) => padding + index * ((width - 2 * padding) / (data.length > 1 ? data.length - 1 : 1));
+
+    // Polyline points
+    const points = data.map((d, i) => `${getX(i)},${getY(d.avgAcc)}`).join(' ');
+
+    return (
+        <div className="chart-wrapper">
+             <svg width={width} height={height} className="chart-svg">
+                 {/* Grid Lines */}
+                 <line x1={padding} y1={getY(25)} x2={width-padding} y2={getY(25)} className="chart-grid-line" />
+                 <line x1={padding} y1={getY(50)} x2={width-padding} y2={getY(50)} className="chart-grid-line" />
+                 <line x1={padding} y1={getY(75)} x2={width-padding} y2={getY(75)} className="chart-grid-line" />
+                 
+                 {/* The Line */}
+                 {data.length > 1 && (
+                     <polyline 
+                       points={points} 
+                       fill="none" 
+                       stroke="#3b82f6" 
+                       strokeWidth="2" 
+                       strokeLinejoin="round" 
+                       strokeLinecap="round"
+                     />
+                 )}
+
+                 {/* Dots */}
+                 {data.map((d, i) => {
+                     const x = getX(i);
+                     const y = getY(d.avgAcc);
+                     return (
+                         <g key={i}>
+                             <circle cx={x} cy={y} r="3" fill="#3b82f6" />
+                             {/* Only show label if sparse or hovered (simplified: show label above point) */}
+                             <text x={x} y={y - 8} textAnchor="middle" className="chart-tooltip">{d.avgAcc}</text>
+                             <text x={x} y={height - 2} textAnchor="middle" fontSize="10" fill="#64748b">{d.day.split('/')[1] || d.day}</text>
+                         </g>
+                     );
+                 })}
+             </svg>
+        </div>
+    );
+};
+
+// Helper for safe storage access
+const getSavedSetting = (key: string, def: any) => {
+    try {
+        const s = localStorage.getItem('dual-n-back-settings-v2');
+        if(s) {
+            const p = JSON.parse(s);
+            return p[key] !== undefined ? p[key] : def;
+        }
+    } catch(e) {}
+    return def;
+};
+
+const Game = () => {
+  // --- Persistent Settings State ---
+  const [n, setN] = useState(() => getSavedSetting('n', DEFAULT_N));
+  const [interval, setInterval] = useState(() => getSavedSetting('interval', DEFAULT_INTERVAL));
+  const [useCenter, setUseCenter] = useState(() => getSavedSetting('useCenter', true));
+  const [isVariable, setIsVariable] = useState(() => getSavedSetting('isVariable', false));
+  const [variableWeights, setVariableWeights] = useState<number[]>(() => getSavedSetting('variableWeights', [1]));
+  const [showFeedback, setShowFeedback] = useState(() => getSavedSetting('showFeedback', false));
+  const [volume, setVolume] = useState(() => getSavedSetting('volume', 0.5));
+  const [displayTime, setDisplayTime] = useState(() => getSavedSetting('displayTime', DEFAULT_DISPLAY_TIME));
+  
+  const [roundMode, setRoundMode] = useState<RoundMode>(() => getSavedSetting('roundMode', 'standard'));
+  const [customRoundCount, setCustomRoundCount] = useState<number>(() => getSavedSetting('customRoundCount', 20));
+  
+  const [pacingMode, setPacingMode] = useState<PacingMode>(() => getSavedSetting('pacingMode', 'standard'));
+  const [showRealtimeInterval, setShowRealtimeInterval] = useState(() => getSavedSetting('showRealtimeInterval', false));
+
+  // New settings for progress display
+  const [showProgressBar, setShowProgressBar] = useState(() => getSavedSetting('showProgressBar', true));
+  const [showRoundCounter, setShowRoundCounter] = useState(() => getSavedSetting('showRoundCounter', true));
+  
+  // New setting for input confirmation
+  const [showInputConfirmation, setShowInputConfirmation] = useState(() => getSavedSetting('showInputConfirmation', true));
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [sequence, setSequence] = useState<GameStep[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(-1);
+  const [totalGameTrials, setTotalGameTrials] = useState(0);
+  
+  const [dynamicInterval, setDynamicInterval] = useState(DEFAULT_INTERVAL);
+  const runningIntervalRef = useRef(DEFAULT_INTERVAL);
+  const startTimeRef = useRef<number>(0);
+  
+  // --- Persistent Data State (Lazy Load) ---
+  const [history, setHistory] = useState<GameResult[]>(() => {
+      try {
+          const s = localStorage.getItem('dual-n-back-history-v4');
+          return s ? JSON.parse(s) : [];
+      } catch(e) { return []; }
+  });
+
+  const [cultivation, setCultivation] = useState<CultivationState>(() => {
+      try {
+          const s = localStorage.getItem('dual-n-back-cultivation-v1');
+          if (s) {
+            const parsed = JSON.parse(s);
+            if (parsed.stageStudyTime === undefined) parsed.stageStudyTime = 0;
+            return {
+                ...parsed,
+                totalSessions: parsed.totalSessions || 0,
+                stageSessions: parsed.stageSessions || 0
+            };
+          }
+      } catch(e) {}
+      return {
+          realmLevel: 1, 
+          stage: 0, 
+          currentXP: 0,
+          recentScores: [], 
+          totalStudyTime: 0, 
+          stageStudyTime: 0,
+          totalSessions: 0,
+          stageSessions: 0
+      };
+  });
+
+  const [milestones, setMilestones] = useState<Milestone[]>(() => {
+      try {
+          const s = localStorage.getItem('dual-n-back-milestones-v1');
+          return s ? JSON.parse(s) : [];
+      } catch(e) { return []; }
+  });
+
+  const [showHistory, setShowHistory] = useState(false);
+  const [expandedDays, setExpandedDays] = useState<Record<string, boolean>>({});
+  
+  const [showSummary, setShowSummary] = useState(false);
+  const [showMilestones, setShowMilestones] = useState(false);
+  const [lastResult, setLastResult] = useState<GameResult | null>(null);
+  
+  const [activePos, setActivePos] = useState<number | null>(null);
+  const [currentNumberDisplay, setCurrentNumberDisplay] = useState<number | null>(null); 
+  
+  const [audioPressed, setAudioPressed] = useState(false);
+  const [visualPressed, setVisualPressed] = useState(false);
+  
+  const [audioFeedback, setAudioFeedback] = useState<'correct' | 'wrong' | null>(null);
+  const [visualFeedback, setVisualFeedback] = useState<'correct' | 'wrong' | null>(null);
+
+  // Analysis state
+  const [searchN, setSearchN] = useState<string>('');
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const scoreRef = useRef<Record<'audio' | 'visual', ScoreDetail>>({
+    audio: { hits: 0, misses: 0, falseAlarms: 0, correctRejections: 0 },
+    visual: { hits: 0, misses: 0, falseAlarms: 0, correctRejections: 0 }
+  });
+
+  const timerRef = useRef<number | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioBuffersRef = useRef<Map<string, AudioBuffer>>(new Map());
+  const inputsRef = useRef({ audio: false, visual: false });
+
+  // --- Effects for Auto-Saving ---
+  
+  // Save Settings
+  useEffect(() => {
+    const s = { n, interval, useCenter, isVariable, variableWeights, showFeedback, volume, roundMode, customRoundCount, showProgressBar, showRoundCounter, showInputConfirmation, displayTime, pacingMode, showRealtimeInterval };
+    localStorage.setItem('dual-n-back-settings-v2', JSON.stringify(s));
+  }, [n, interval, useCenter, isVariable, variableWeights, showFeedback, volume, roundMode, customRoundCount, showProgressBar, showRoundCounter, showInputConfirmation, displayTime, pacingMode, showRealtimeInterval]);
+
+  // Save History
+  useEffect(() => {
+     // Check length to avoid saving empty state over existing data if load failed (though lazy init handles this)
+     // Also prevents writing if history is empty (new user), but that's fine.
+     localStorage.setItem('dual-n-back-history-v4', JSON.stringify(history));
+  }, [history]);
+
+  // Save Cultivation
+  useEffect(() => {
+     localStorage.setItem('dual-n-back-cultivation-v1', JSON.stringify(cultivation));
+  }, [cultivation]);
+
+  // Save Milestones
+  useEffect(() => {
+     localStorage.setItem('dual-n-back-milestones-v1', JSON.stringify(milestones));
+  }, [milestones]);
+
+
+  const handleExportData = () => {
+    const data = {
+      history,
+      cultivation,
+      milestones
+    };
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dualn-back-${formatDateForFilename(Date.now())}.json`;
+    a.click();
+  };
+
+  const handleImportData = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target?.result as string);
+        if (data.history) setHistory(data.history);
+        if (data.cultivation) setCultivation(data.cultivation);
+        if (data.milestones) setMilestones(data.milestones);
+        alert('存档导入成功！');
+      } catch (err) {
+        alert('存档文件无效');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  useEffect(() => {
+    if (variableWeights.length !== n) {
+       const newWeights = new Array(n).fill(10); 
+       setVariableWeights(newWeights);
+    }
+
+    const initAudio = async () => {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        audioContextRef.current = new AudioCtx();
+        for (const letter of LETTERS) {
+          try {
+            const response = await fetch(`${letter}.wav`);
+            if (response.ok) {
+              const arrayBuffer = await response.arrayBuffer();
+              const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+              audioBuffersRef.current.set(letter, audioBuffer);
+            }
+          } catch (e) {}
+        }
+      }
+    };
+    initAudio();
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (audioContextRef.current) audioContextRef.current.close();
+    };
+  }, [n]); 
+
+  const playSound = (letter: string) => {
+    if (!audioContextRef.current) return;
+    if (audioContextRef.current.state === 'suspended') audioContextRef.current.resume();
+    const buffer = audioBuffersRef.current.get(letter);
+    if (buffer) {
+      const source = audioContextRef.current.createBufferSource();
+      source.buffer = buffer;
+      const gainNode = audioContextRef.current.createGain();
+      gainNode.gain.value = volume;
+      source.connect(gainNode);
+      gainNode.connect(audioContextRef.current.destination);
+      source.start(0);
+    } else {
+      window.speechSynthesis.cancel(); // ensure previous is cleared
+      const utterance = new SpeechSynthesisUtterance(letter.toUpperCase());
+      utterance.lang = 'en-US';
+      utterance.rate = 1.6;
+      utterance.volume = volume;
+      window.speechSynthesis.speak(utterance);
+    }
+  };
+
+  const startGame = async() => {
+    if (isPlaying) return;
+    
+    startTimeRef.current = Date.now();
+
+    // Explicitly resume audio context on user interaction (start game)
+    if (audioContextRef.current) {
+      if (audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+        // Give a tiny delay to ensure context is fully active
+        await new Promise(r => setTimeout(r, 50));
+      }
+      
+      // Warm up audio buffer to prevent first-sound cutoff
+      // Play a random letter at 0 volume to force mixer activation
+      try {
+        const randomLetter = LETTERS[Math.floor(Math.random() * LETTERS.length)];
+        const buffer = audioBuffersRef.current.get(randomLetter);
+        
+        if (buffer) {
+           const source = audioContextRef.current.createBufferSource();
+           source.buffer = buffer;
+           const gainNode = audioContextRef.current.createGain();
+           gainNode.gain.value = 0; // Muted
+           source.connect(gainNode);
+           gainNode.connect(audioContextRef.current.destination);
+           source.start(0);
+        } else {
+           // Fallback to empty buffer
+           const buffer = audioContextRef.current.createBuffer(1, 1, 22050);
+           const source = audioContextRef.current.createBufferSource();
+           source.buffer = buffer;
+           source.connect(audioContextRef.current.destination);
+           source.start(0);
+        }
+      } catch(e) {}
+    }
+    
+    const trials = getRoundCount(n, roundMode, customRoundCount);
+    setTotalGameTrials(trials);
+    
+    const currentWeights = variableWeights.length === n ? variableWeights : new Array(n).fill(10);
+    
+    const newSeq = generateSequence(trials, n, useCenter, isVariable, currentWeights);
+    setSequence(newSeq);
+    setCurrentIndex(-1);
+    setIsPlaying(true);
+    setShowSummary(false);
+    
+    // Reset Dynamic Interval to base
+    setDynamicInterval(interval);
+    runningIntervalRef.current = interval;
+    
+    scoreRef.current = {
+      audio: { hits: 0, misses: 0, falseAlarms: 0, correctRejections: 0 },
+      visual: { hits: 0, misses: 0, falseAlarms: 0, correctRejections: 0 }
+    };
+
+    // Delay start by 2000ms
+    setTimeout(() => nextTrial(0, newSeq), 2000);
+  };
+
+  const stopGame = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setIsPlaying(false);
+    setActivePos(null);
+    setCurrentNumberDisplay(null);
+  };
+
+  const calculateVariableDifficulty = () => {
+    if (!isVariable) return n;
+    const totalW = variableWeights.reduce((a, b) => a + b, 0);
+    if (totalW === 0) return 0;
+    let weightedSum = 0;
+    variableWeights.forEach((w, i) => {
+      weightedSum += (i + 1) * w;
+    });
+    return parseFloat((weightedSum / totalW).toFixed(2));
+  };
+
+  const saveResults = () => {
+    const vScore = scoreRef.current.visual;
+    const aScore = scoreRef.current.audio;
+    const totalHits = vScore.hits + aScore.hits;
+    const totalMisses = vScore.misses + aScore.misses;
+    const totalFalse = vScore.falseAlarms + aScore.falseAlarms;
+    const totalAccVal = calculateAccuracy(totalHits, totalMisses, totalFalse);
+    const accFraction = totalAccVal / 100;
+
+    const difficulty = isVariable ? calculateVariableDifficulty() : n;
+    
+    // New Score Formula: 10^N * ((64^Acc - 1) / 63)
+    const multiplier = (Math.pow(64, accFraction) - 1) / 63;
+    const calculatedScore = Math.pow(10, difficulty) * multiplier;
+
+    // --- Update Cultivation ---
+    const nextCultivation = { ...cultivation };
+    const newMilestonesList: Milestone[] = [];
+    
+    const resultId = Date.now().toString();
+    const resultTimestamp = Date.now();
+    
+    // Calculate REAL session duration
+    const endTime = Date.now();
+    const sessionTime = (endTime - startTimeRef.current) / 1000;
+
+    nextCultivation.totalStudyTime += sessionTime;
+    nextCultivation.stageStudyTime += sessionTime;
+    nextCultivation.totalSessions = (nextCultivation.totalSessions || 0) + 1;
+    nextCultivation.stageSessions = (nextCultivation.stageSessions || 0) + 1;
+
+    const realm = nextCultivation.realmLevel;
+    const stage = nextCultivation.stage;
+
+    // Check for Major Breakthrough (Tribulation) to Next Realm
+    // Available at Stage 6 (Perfect) or Stage 7 (Great Perfect)
+    // Requirement: N >= Realm + 1 AND Acc >= 80%
+    if (stage === 6 || stage === 7) {
+        const isHardEnough = difficulty >= (realm + 1);
+        const isAccurateEnough = totalAccVal >= 80;
+
+        if (isHardEnough && isAccurateEnough) {
+             const inheritedXP = Math.floor(nextCultivation.currentXP / 2);
+             
+             newMilestonesList.push({
+                id: Date.now().toString(),
+                timestamp: Date.now(),
+                type: 'major',
+                title: `渡劫成功！晋升${REALMS[realm + 1]}`,
+                description: `从${STAGES[stage]}突破桎梏。获得初始经验 ${formatScore(inheritedXP)}。难度 N=${n}, 准确率 ${totalAccVal}%。`,
+                stageDuration: nextCultivation.stageStudyTime,
+                totalDuration: nextCultivation.totalStudyTime,
+                stageSessions: nextCultivation.stageSessions,
+                totalSessions: nextCultivation.totalSessions
+             });
+             
+             nextCultivation.realmLevel += 1;
+             nextCultivation.stage = 0;
+             nextCultivation.currentXP = inheritedXP;
+             nextCultivation.recentScores = [];
+             nextCultivation.stageStudyTime = 0;
+             nextCultivation.stageSessions = 0;
+             
+             // Done with cultivation update for this session
+             finalizeResults(nextCultivation, newMilestonesList, calculatedScore, totalAccVal, difficulty);
+             return;
+        }
+    }
+
+    // Normal Progression
+    if (stage === 0 || stage === 2 || stage === 4) {
+      // Accumulation Stages
+      nextCultivation.currentXP += calculatedScore;
+      const maxXP = getMaxXP(realm, stage);
+      
+      if (nextCultivation.currentXP >= maxXP) {
+        newMilestonesList.push({
+          id: Date.now().toString(),
+          timestamp: Date.now(),
+          type: 'peak',
+          title: `到达${REALMS[realm]}${STAGES[stage]}巅峰`,
+          description: `修为积累圆满 (需达到 ${formatScore(maxXP)} 经验)。`,
+          stageDuration: nextCultivation.stageStudyTime,
+          totalDuration: nextCultivation.totalStudyTime,
+          stageSessions: nextCultivation.stageSessions,
+          totalSessions: nextCultivation.totalSessions
+        });
+
+        nextCultivation.stage += 1; 
+        nextCultivation.currentXP = 0;
+        nextCultivation.recentScores = []; 
+        nextCultivation.stageStudyTime = 0;
+        nextCultivation.stageSessions = 0;
+      }
+    } else if (stage === 1 || stage === 3 || stage === 5) {
+      // Bottleneck Stages (Weighted Average)
+      // Stage 5 (Late Peak) now breaks through to Stage 6 (Perfect)
+      const prevWeighted = nextCultivation.currentXP;
+      const newWeighted = prevWeighted * (2/3) + calculatedScore;
+      nextCultivation.currentXP = newWeighted;
+      
+      const target = getBreakthroughTarget(realm, stage);
+      
+      if (newWeighted >= target) {
+        // Handle specific title for Stage 5 -> 6
+        const nextStageIdx = stage + 1;
+        const nextStageName = STAGES[nextStageIdx];
+        
+        newMilestonesList.push({
+          id: Date.now().toString(),
+          timestamp: Date.now(),
+          type: 'minor',
+          title: `突破至${REALMS[realm]}${nextStageName}`,
+          description: `瓶颈突破成功！本次综合评分 ${formatScore(newWeighted)} (要求 ≥ ${formatScore(target)})。`,
+          stageDuration: nextCultivation.stageStudyTime,
+          totalDuration: nextCultivation.totalStudyTime,
+          stageSessions: nextCultivation.stageSessions,
+          totalSessions: nextCultivation.totalSessions
+        });
+
+        nextCultivation.stage = nextStageIdx;
+        nextCultivation.currentXP = 0;
+        nextCultivation.recentScores = [];
+        nextCultivation.stageStudyTime = 0;
+        nextCultivation.stageSessions = 0;
+      }
+    } else if (stage === 6) {
+        // Perfect Stage (圆满) - Accumulation
+        // Can accumulate up to NextRealmEarlyMax
+        nextCultivation.currentXP += calculatedScore;
+        const maxXP = getMaxXP(realm, stage); // Returns NextRealm Early Peak Cap
+        
+        if (nextCultivation.currentXP >= maxXP) {
+            newMilestonesList.push({
+                id: Date.now().toString(),
+                timestamp: Date.now(),
+                type: 'peak',
+                title: `到达${REALMS[realm]}大圆满`,
+                description: `修为已至化境，无可再进。需寻找契机渡劫飞升。`,
+                stageDuration: nextCultivation.stageStudyTime,
+                totalDuration: nextCultivation.totalStudyTime,
+                stageSessions: nextCultivation.stageSessions,
+                totalSessions: nextCultivation.totalSessions
+            });
+            
+            nextCultivation.currentXP = maxXP; // Cap it
+            nextCultivation.stage = 7; // Great Perfect
+            nextCultivation.recentScores = [];
+            nextCultivation.stageStudyTime = 0;
+            nextCultivation.stageSessions = 0;
+        }
+    } else if (stage === 7) {
+        // Great Perfect - No XP gain, just wait for Tribulation
+    }
+
+    finalizeResults(nextCultivation, newMilestonesList, calculatedScore, totalAccVal, difficulty);
+  };
+  
+  const finalizeResults = (
+      nextCultivation: CultivationState, 
+      newMilestonesList: Milestone[], 
+      calculatedScore: number, 
+      totalAccVal: number,
+      difficulty: number
+  ) => {
+    const result: GameResult = {
+      id: Date.now().toString(),
+      timestamp: Date.now(),
+      n,
+      interval,
+      totalTrials: sequence.length,
+      audioScore: { ...scoreRef.current.audio },
+      visualScore: { ...scoreRef.current.visual },
+      isVariable,
+      variableDifficulty: isVariable ? difficulty : undefined,
+      score: calculatedScore,
+      accuracy: totalAccVal,
+      device: getDeviceType(),
+      realmLevel: cultivation.realmLevel,
+      stage: cultivation.stage,
+      afterRealmLevel: nextCultivation.realmLevel,
+      afterStage: nextCultivation.stage,
+      pacingMode
+    };
+    
+    setLastResult(result);
+
+    setHistory(prev => {
+        const newH = [result, ...prev];
+        if (newH.length > 3000) newH.pop();
+        return newH;
+    });
+    
+    setCultivation(nextCultivation);
+    if (newMilestonesList.length > 0) {
+        setMilestones(prev => [...newMilestonesList, ...prev]);
+    }
+
+    setShowSummary(true);
+  };
+
+  const nextTrial = (idx: number, seq: GameStep[], overrideDuration?: number) => {
+    if (idx >= seq.length) {
+      stopGame();
+      saveResults();
+      return;
+    }
+
+    setCurrentIndex(idx);
+    inputsRef.current = { audio: false, visual: false };
+    
+    const step = seq[idx];
+    
+    setActivePos(step.position);
+    if (isVariable && idx >= n) {
+      setCurrentNumberDisplay(step.nBack);
+    } else {
+      setCurrentNumberDisplay(null);
+    }
+
+    playSound(step.letter);
+
+    setAudioPressed(false);
+    setVisualPressed(false);
+    setAudioFeedback(null);
+    setVisualFeedback(null);
+
+    // If not self-paced, schedule next trial
+    if (pacingMode !== 'self-paced') {
+       // Use overrideDuration if provided (calculated from previous step), otherwise default logic
+       let dur = interval * 1000;
+       
+       if (pacingMode === 'dynamic') {
+           // Prioritize override, fallback to ref, fallback to interval
+           const dyn = overrideDuration !== undefined ? overrideDuration : runningIntervalRef.current;
+           dur = dyn * 1000;
+       }
+
+       timerRef.current = window.setTimeout(() => {
+          finishTrialAndNext(idx, seq);
+       }, dur);
+    }
+  };
+
+  const finishTrialAndNext = (idx: number, seq: GameStep[]) => {
+    const step = seq[idx];
+    const effectiveN = isVariable ? step.nBack : n;
+    
+    // Dynamic Logic Variables
+    let hasError = false;
+    let hasHit = false;
+
+    if (idx >= effectiveN) {
+       const currentStep = seq[idx];
+       const nBackStep = seq[idx - effectiveN];
+       
+       const isAudioMatch = currentStep.letter === nBackStep.letter;
+       const isVisualMatch = currentStep.position === nBackStep.position;
+       
+       const aPressed = inputsRef.current.audio;
+       const vPressed = inputsRef.current.visual;
+
+       if (isAudioMatch) {
+         if (aPressed) { scoreRef.current.audio.hits++; hasHit = true; }
+         else { scoreRef.current.audio.misses++; hasError = true; }
+       } else {
+         if (aPressed) { scoreRef.current.audio.falseAlarms++; hasError = true; }
+         else scoreRef.current.audio.correctRejections++;
+       }
+
+       if (isVisualMatch) {
+         if (vPressed) { scoreRef.current.visual.hits++; hasHit = true; }
+         else { scoreRef.current.visual.misses++; hasError = true; }
+       } else {
+         if (vPressed) { scoreRef.current.visual.falseAlarms++; hasError = true; }
+         else scoreRef.current.visual.correctRejections++;
+       }
+    }
+    
+    let nextIntervalVal = runningIntervalRef.current;
+
+    if (pacingMode === 'dynamic') {
+        let delta = 0;
+        // Prioritize Error Logic
+        if (hasError) {
+            const rawNext = parseFloat((runningIntervalRef.current + 0.1).toFixed(2));
+            // Ensure not shorter than default (interval), clamp to max
+            const clampedMin = Math.max(rawNext, interval);
+            const absoluteMax = parseFloat((interval + 1.0).toFixed(2));
+            nextIntervalVal = Math.min(clampedMin, absoluteMax);
+        } else if (hasHit) {
+            // Success Logic
+            const rawNext = parseFloat((runningIntervalRef.current - 0.05).toFixed(2));
+            // Clamp to min
+            const absoluteMin = Math.max(0.1, parseFloat((interval - 0.5).toFixed(2)));
+            nextIntervalVal = Math.max(rawNext, absoluteMin);
+        }
+        
+        runningIntervalRef.current = nextIntervalVal;
+        setDynamicInterval(nextIntervalVal);
+    }
+
+    setActivePos(null); 
+    nextTrial(idx + 1, seq, nextIntervalVal);
+  };
+
+  useEffect(() => {
+    if (currentIndex >= 0 && isPlaying) {
+      // Flash duration for visual stimulus
+      const showDuration = displayTime * 1000;
+      const t = setTimeout(() => {
+        setActivePos(null);
+        setCurrentNumberDisplay(null); // Hide number as well
+      }, showDuration); 
+      return () => clearTimeout(t);
+    }
+  }, [currentIndex, isPlaying, interval, displayTime]);
+
+  const handleInput = useCallback((type: 'audio' | 'visual') => {
+    if (!isPlaying) return;
+    
+    const currentStep = sequence[currentIndex];
+    const effectiveN = isVariable ? currentStep.nBack : n;
+    
+    if (currentIndex < effectiveN) return; 
+    
+    const nBackStep = sequence[currentIndex - effectiveN];
+    
+    if (type === 'audio') {
+      if (inputsRef.current.audio) return;
+      inputsRef.current.audio = true;
+      setAudioPressed(true);
+      if (showFeedback) {
+        const isMatch = currentStep.letter === nBackStep.letter;
+        setAudioFeedback(isMatch ? 'correct' : 'wrong');
+      }
+    } else {
+      if (inputsRef.current.visual) return;
+      inputsRef.current.visual = true;
+      setVisualPressed(true);
+      if (showFeedback) {
+        const isMatch = currentStep.position === nBackStep.position;
+        setVisualFeedback(isMatch ? 'correct' : 'wrong');
+      }
+    }
+  }, [isPlaying, currentIndex, n, sequence, isVariable, showFeedback]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') handleInput('visual');
+      if (e.code === 'KeyL' || e.code === 'ArrowRight') handleInput('audio');
+      
+      // Self-paced Mode Logic
+      if (pacingMode === 'self-paced' && isPlaying && e.code === 'Space') {
+          e.preventDefault();
+          // Advance manually
+          finishTrialAndNext(currentIndex, sequence);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleInput, pacingMode, isPlaying, currentIndex, sequence]);
+
+  const handleWeightChange = (index: number, val: string) => {
+    const newW = [...variableWeights];
+    const num = parseInt(val) || 0;
+    newW[index] = Math.max(0, num);
+    setVariableWeights(newW);
+  };
+
+  const renderSummary = (result: GameResult) => {
+    return (
+      <div className="modal-overlay" onClick={() => setShowSummary(false)}>
+        <div className="modal" onClick={e => e.stopPropagation()}>
+          <div style={{textAlign: 'center', marginBottom: 20}}>
+            <h2 style={{margin: 0, fontSize: '1.5rem'}}>训练报告</h2>
+            <div style={{color: '#64748b', margin: '8px 0', fontSize: '0.95rem'}}>
+              {result.isVariable ? (
+                <>Variable N ({result.variableDifficulty})</>
+              ) : (
+                 <>N = {result.n}</>
+              )}
+               {' '}| {result.interval}s 
+               {result.pacingMode === 'dynamic' && ' (动态)'}
+               {result.pacingMode === 'self-paced' && ' (手动)'}
+            </div>
+            {result.score !== undefined && (
+               <div style={{display: 'inline-flex', alignItems: 'center', gap: 6, background: '#fff7ed', color: '#ea580c', padding: '6px 12px', borderRadius: 20, fontWeight: 700, fontSize: '1.1rem', marginTop: 8}}>
+                 <Trophy size={18} /> {formatScore(result.score)}
+               </div>
+            )}
+          </div>
+
+          <div className="summary-grid">
+            <div className="summary-item">
+               <StatsTable visual={result.visualScore} audio={result.audioScore} />
+            </div>
+          </div>
+
+          <button className="btn btn-primary" style={{width: '100%', marginTop: 24, justifyContent: 'center', padding: 12}} onClick={() => setShowSummary(false)}>
+            完成
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const getBtnClassName = (feedback: 'correct' | 'wrong' | null, pressed: boolean) => {
+    let classes = 'match-btn';
+    if (showFeedback && feedback) {
+      classes += ` ${feedback}`;
+    } else if (pressed && showInputConfirmation) {
+      classes += ' pressed';
+    }
+    return classes;
+  };
+
+  const remaining = isPlaying ? Math.max(0, sequence.length - (currentIndex + 1)) : totalGameTrials;
+
+  const realmName = REALMS[cultivation.realmLevel] || '未知';
+  const stageName = STAGES[cultivation.stage] || '';
+  
+  // Stages: 0,1,2,3,4,5,6,7
+  // Accumulation: 0, 2, 4, 6
+  // Bottleneck: 1, 3, 5
+  // Great Perfect: 7 (No progress)
+  const isBottleneck = [1, 3, 5].includes(cultivation.stage);
+  const isGreatPerfect = cultivation.stage === 7;
+  
+  let progressPercent = 0;
+  let progressText = '';
+  let bottleneckContent = null;
+  
+  if (cultivation.realmLevel >= 10) {
+      progressPercent = 100;
+      progressText = "渡劫飞升";
+  } else if (isGreatPerfect) {
+      progressPercent = 100;
+      progressText = "大圆满 (待渡劫)";
+      bottleneckContent = (
+         <div className="bottleneck-info">
+           <div style={{fontWeight: 600, marginBottom: 4, color: '#b45309'}}>渡劫条件</div>
+           <div>1. 难度 N ≥ {cultivation.realmLevel + 1}</div>
+           <div>2. 准确率 ≥ 80%</div>
+           <div style={{fontSize: '0.8rem', marginTop: 6, color: '#64748b'}}>* 成功可继承50%当前经验</div>
+         </div>
+      );
+  } else if (!isBottleneck) {
+      // Accumulation (0, 2, 4, 6)
+      const maxXP = getMaxXP(cultivation.realmLevel, cultivation.stage);
+      progressPercent = Math.min(100, (cultivation.currentXP / maxXP) * 100);
+      progressText = `修为: ${formatScore(cultivation.currentXP)} / ${formatScore(maxXP)}`;
+      
+      if (cultivation.stage === 6) {
+          // Perfect Stage also has Tribulation hint
+          bottleneckContent = (
+             <div className="bottleneck-info">
+               <div style={{fontWeight: 600, marginBottom: 4, color: '#0369a1'}}>圆满之境</div>
+               <div style={{fontSize: '0.8rem', color: '#475569', marginBottom: 4}}>
+                   可继续积累至大圆满，或直接尝试渡劫。
+               </div>
+               <div style={{fontSize: '0.8rem', color: '#64748b'}}>
+                   渡劫要求: N ≥ {cultivation.realmLevel + 1}, 准确率 ≥ 80%
+               </div>
+             </div>
+          );
+      }
+  } else {
+      // Bottleneck (1, 3, 5)
+      const weightedScore = cultivation.currentXP;
+      const target = getBreakthroughTarget(cultivation.realmLevel, cultivation.stage);
+      progressPercent = Math.min(100, (weightedScore / target) * 100);
+      progressText = `冲关进度: ${formatScore(weightedScore)} / ${formatScore(target)}`;
+      
+      bottleneckContent = (
+         <div className="bottleneck-info">
+           <div style={{fontWeight: 600, marginBottom: 4, color: '#0369a1'}}>瓶颈突破</div>
+           <div style={{fontSize: '0.8rem', color: '#475569', marginBottom: 8}}>
+              当前积累: <span style={{fontWeight: 700}}>{formatScore(weightedScore)}</span> / {formatScore(target)}
+           </div>
+           <div style={{fontSize: '0.75rem', color: '#94a3b8'}}>
+              * 规则: 每次得分累计 (旧分×⅔ + 新分)
+           </div>
+         </div>
+      );
+  }
+
+  // Calculate filtered history for display and chart
+  const filteredHistory = useMemo(() => {
+     let data = history;
+     const targetN = parseFloat(searchN);
+     if (!isNaN(targetN) && searchN !== '') {
+         data = data.filter(h => {
+             // For Variable N, match difficulty. For fixed N, match N.
+             if (h.isVariable) {
+                 return Math.abs((h.variableDifficulty || 0) - targetN) < 0.05;
+             }
+             return h.n === targetN;
+         });
+     }
+     return data;
+  }, [history, searchN]);
+
+  // History Grouping Logic
+  const groupedHistory = useMemo(() => {
+    const groups: Record<string, GameResult[]> = {};
+    filteredHistory.forEach(h => {
+        const d = new Date(h.timestamp).toLocaleDateString('zh-CN');
+        if (!groups[d]) groups[d] = [];
+        groups[d].push(h);
+    });
+    return groups;
+  }, [filteredHistory]);
+
+  const toggleDay = (dateStr: string) => {
+      setExpandedDays(prev => ({ ...prev, [dateStr]: !prev[dateStr] }));
+  };
+  
+  // Stats Data for Chart
+  const statsData = useMemo(() => {
+      const targetN = parseFloat(searchN);
+      if (isNaN(targetN) || searchN === '') return null;
+      
+      const dayMap = new Map();
+      // Iterate Newest -> Oldest
+      for (const r of filteredHistory) {
+          const d = new Date(r.timestamp).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+           if (!dayMap.has(d)) dayMap.set(d, { totalAcc: 0, count: 0 });
+          const entry = dayMap.get(d);
+          entry.totalAcc += r.accuracy;
+          entry.count += 1;
+      }
+      
+      // Convert map to array. Since insertion order in Map is consistent (New->Old), we get New->Old array.
+      // We want chart to be Old -> New (Left -> Right).
+      const list: { day: string, avgAcc: number }[] = [];
+      dayMap.forEach((val, key) => {
+          list.push({
+              day: key,
+              avgAcc: parseFloat((val.totalAcc / val.count).toFixed(1))
+          });
+      });
+      
+      return list.reverse(); // Reverse to get Old -> New
+  }, [filteredHistory, searchN]);
+
+  return (
+    <div className="app-container">
+      <style>{styles}</style>
+      
+      <header className="header">
+        <div>
+           <h1 style={{margin: 0, fontSize: '1.2rem', fontWeight: 800, color: '#0f172a'}}>Dual N-Back</h1>
+        </div>
+        <div style={{display: 'flex', gap: 8}}>
+          <button className="btn btn-secondary" onClick={() => setShowMilestones(true)} style={{padding: '6px 10px', fontSize: '0.9rem'}}>
+            <Scroll size={16} /> 仙途
+          </button>
+          <button className="btn btn-secondary" onClick={() => setShowHistory(true)} style={{padding: '6px 10px', fontSize: '0.9rem'}}>
+            <History size={16} /> 记录
+          </button>
+        </div>
+      </header>
+
+      {/* Cultivation Panel */}
+      <div className="cultivation-card">
+        <div className="realm-title">
+          <span>{realmName} <span style={{fontSize: '1rem', fontWeight: 600, color: '#0369a1'}}>{stageName}</span></span>
+          <span style={{fontSize: '0.9rem', color: '#0ea5e9', display: 'flex', alignItems: 'center', gap: 4}}>
+             {isBottleneck || isGreatPerfect ? <Lock size={16} /> : <Zap size={16} fill="currentColor" />} {isGreatPerfect ? '大圆满' : isBottleneck ? '瓶颈' : '修炼中'}
+          </span>
+        </div>
+        <div className="cultivation-stats">
+          <span style={{display: 'flex', alignItems: 'center', gap: 4}}>
+            <Clock size={14} /> 累计: {formatDuration(cultivation.totalStudyTime)}
+          </span>
+          <span style={{display: 'flex', alignItems: 'center', gap: 4, color: '#64748b'}}>
+             (本阶: {formatDuration(cultivation.stageStudyTime)})
+          </span>
+          <span style={{display: 'flex', alignItems: 'center', gap: 4}}>
+             <Activity size={14} /> 累计练习: {cultivation.totalSessions || 0}次
+          </span>
+          <span style={{display: 'flex', alignItems: 'center', gap: 4, color: '#64748b'}}>
+             (本阶: {cultivation.stageSessions || 0}次)
+          </span>
+        </div>
+        <div className="xp-bar-container">
+          <div className="xp-bar-fill" style={{width: `${progressPercent}%`, background: isBottleneck ? '#f59e0b' : 'linear-gradient(90deg, #3b82f6, #06b6d4)'}} />
+        </div>
+        <div className="xp-text">
+          {progressText}
+        </div>
+        
+        {bottleneckContent}
+      </div>
+
+      <div className="game-area">
+        {isPlaying && (
+            <div className="game-config-display">
+                <span style={{display: 'flex', alignItems: 'center', gap: 4}}>
+                    N={n} {isVariable ? `(Var ${calculateVariableDifficulty()})` : ''} 
+                    {pacingMode === 'self-paced' && <span style={{fontSize: '0.75rem', background: '#e0f2fe', color: '#0284c7', padding: '1px 4px', borderRadius: 4}}>手动</span>}
+                </span>
+                <span style={{display: 'flex', alignItems: 'center', gap: 4}}>
+                    {pacingMode === 'dynamic' ? (
+                        <>
+                           <Gauge size={14} /> 
+                           {showRealtimeInterval ? dynamicInterval : interval}s {showRealtimeInterval ? `(基准${interval}s)` : '(动态)'}
+                        </>
+                    ) : (
+                        <>{interval}s</>
+                    )}
+                </span>
+                <span>
+                   {showRoundCounter ? `Trials: ${currentIndex + 1}/${totalGameTrials}` : `Total: ${totalGameTrials}`}
+                </span>
+            </div>
+        )}
+        
+        {/* Progress Info */}
+        {(showProgressBar || showRoundCounter) && (
+          <div className="progress-info" style={{ justifyContent: showProgressBar ? 'space-between' : 'flex-end' }}>
+            {showProgressBar && (
+              <div className="progress-bar-bg">
+                 <div className="progress-bar-fill" style={{width: isPlaying ? `${((currentIndex + 1) / sequence.length) * 100}%` : '0%'}} />
+              </div>
+            )}
+            {showRoundCounter && (
+              <span style={{minWidth: '70px', textAlign: 'right'}}>
+                 {isPlaying && pacingMode === 'self-paced' ? <span style={{color: '#f59e0b', fontWeight: 700}}>空格继续</span> : null}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* The Grid */}
+        <div className="grid-board">
+          {Array.from({ length: GRID_SIZE }).map((_, i) => (
+            <div key={i} className="grid-cell">
+               {/* Disabled Cross for center (index 4) if NOT Variable and NOT UseCenter */}
+               {i === 4 && (!useCenter && !isVariable) && <div className="disabled-cross" />}
+               
+               {activePos === i && <div className="active-block" />}
+               
+               {/* Show number in center (index 4) if Variable */}
+               {i === 4 && isVariable && currentNumberDisplay !== null && (
+                 <div className="center-number">{currentNumberDisplay}</div>
+               )}
+            </div>
+          ))}
+        </div>
+
+        {/* Control Panel */}
+        <div className="control-panel">
+          <div 
+            className={getBtnClassName(visualFeedback, visualPressed)}
+            onClick={() => handleInput('visual')}
+          >
+            <Square size={24} color={(showFeedback && visualFeedback === 'correct') ? '#22c55e' : (showFeedback && visualFeedback === 'wrong') ? '#ef4444' : '#64748b'} />
+            <span style={{marginTop: 8, fontWeight: 700, fontSize: '0.9rem'}}>位置</span>
+            <span style={{fontSize: '0.7rem', color: '#94a3b8'}}>Key: A</span>
+          </div>
+
+          <div className="play-btn-wrapper">
+             {!isPlaying ? (
+               <button className="btn btn-primary" style={{width: 64, height: 64, borderRadius: '50%', padding: 0, justifyContent: 'center', boxShadow: '0 4px 10px rgba(59, 130, 246, 0.3)'}} onClick={startGame}>
+                 <Play size={28} fill="white" style={{marginLeft: 4}} />
+               </button>
+             ) : (
+               <button className="btn btn-danger" style={{width: 56, height: 56, borderRadius: '50%', padding: 0, justifyContent: 'center'}} onClick={stopGame}>
+                 <X size={24} />
+               </button>
+             )}
+          </div>
+
+          <div 
+            className={getBtnClassName(audioFeedback, audioPressed)}
+            onClick={() => handleInput('audio')}
+          >
+            <Volume2 size={24} color={(showFeedback && audioFeedback === 'correct') ? '#22c55e' : (showFeedback && audioFeedback === 'wrong') ? '#ef4444' : '#64748b'} />
+            <span style={{marginTop: 8, fontWeight: 700, fontSize: '0.9rem'}}>声音</span>
+            <span style={{fontSize: '0.7rem', color: '#94a3b8'}}>Key: L</span>
+          </div>
+        </div>
+
+        {/* Manual Next Button */}
+        {isPlaying && pacingMode === 'self-paced' && (
+           <div style={{marginTop: 20, width: '100%', display: 'flex', justifyContent: 'center'}}>
+               <button 
+                 className="btn btn-secondary" 
+                 style={{
+                    width: 'min(92vmin, 350px)', 
+                    padding: '14px', 
+                    justifyContent: 'center', 
+                    fontSize: '1rem',
+                    border: '2px solid #cbd5e1',
+                    background: '#fff',
+                    boxShadow: '0 4px 10px rgba(0,0,0,0.05)'
+                 }}
+                 onClick={() => finishTrialAndNext(currentIndex, sequence)}
+               >
+                 <Hand size={20} /> 下一轮 (空格)
+               </button>
+           </div>
+        )}
+
+        {/* Settings */}
+        {!isPlaying && (
+          <div className="settings-container">
+            <h3 style={{margin: '0 0 16px', fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: 8}}>
+              <Settings size={20} /> 设置
+            </h3>
+
+            {/* Data Management */}
+             <div className="setting-section">
+               <div style={{display: 'flex', gap: 10, marginBottom: 12}}>
+                 <button className="btn btn-secondary" style={{flex: 1, fontSize: '0.85rem', justifyContent: 'center'}} onClick={handleExportData}>
+                   <Download size={16} /> 导出存档
+                 </button>
+                 <button className="btn btn-secondary" style={{flex: 1, fontSize: '0.85rem', justifyContent: 'center'}} onClick={() => fileInputRef.current?.click()}>
+                   <Upload size={16} /> 导入存档
+                 </button>
+                 <input type="file" ref={fileInputRef} onChange={handleImportData} style={{display: 'none'}} accept=".json" />
+               </div>
+            </div>
+            
+            <div className="setting-section">
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>实时对错反馈</span>
+                <label className="toggle-switch">
+                  <input type="checkbox" checked={showFeedback} onChange={e => setShowFeedback(e.target.checked)} />
+                  <span className="slider"></span>
+                </label>
+              </div>
+              
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>按键确认反馈</span>
+                <label className="toggle-switch">
+                  <input type="checkbox" checked={showInputConfirmation} onChange={e => setShowInputConfirmation(e.target.checked)} />
+                  <span className="slider"></span>
+                </label>
+              </div>
+
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>显示进度条</span>
+                <label className="toggle-switch">
+                  <input type="checkbox" checked={showProgressBar} onChange={e => setShowProgressBar(e.target.checked)} />
+                  <span className="slider"></span>
+                </label>
+              </div>
+              
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>显示剩余轮数</span>
+                <label className="toggle-switch">
+                  <input type="checkbox" checked={showRoundCounter} onChange={e => setShowRoundCounter(e.target.checked)} />
+                  <span className="slider"></span>
+                </label>
+              </div>
+
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6}}>
+                  {volume === 0 ? <VolumeX size={18} /> : volume < 0.5 ? <Volume1 size={18} /> : <VolumeIcon size={18} />} 音量
+                </span>
+                <div className="volume-slider-container">
+                   <input 
+                     type="range" 
+                     min="0" 
+                     max="1" 
+                     step="0.05" 
+                     value={volume} 
+                     onChange={(e) => setVolume(parseFloat(e.target.value))}
+                     className="volume-slider"
+                   />
+                </div>
+              </div>
+            </div>
+            
+            <div className="setting-section">
+               <div className="setting-row" style={{marginBottom: 8}}>
+                  <span style={{fontSize: '0.9rem', fontWeight: 600}}>训练轮数 (Trials)</span>
+               </div>
+               <div className="round-mode-selector">
+                  <button 
+                    className={`round-mode-btn ${roundMode === 'standard' ? 'active' : ''}`}
+                    onClick={() => setRoundMode('standard')}
+                  >
+                    20 + N²
+                  </button>
+                  <button 
+                    className={`round-mode-btn ${roundMode === 'linear' ? 'active' : ''}`}
+                    onClick={() => setRoundMode('linear')}
+                  >
+                    20 + 4N
+                  </button>
+                  <button 
+                    className={`round-mode-btn ${roundMode === 'custom' ? 'active' : ''}`}
+                    onClick={() => setRoundMode('custom')}
+                  >
+                    自定义
+                  </button>
+               </div>
+               {roundMode === 'custom' && (
+                  <div style={{display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10}}>
+                      <span style={{fontSize: '0.85rem', color: '#64748b'}}>设置次数:</span>
+                      <div className="input-control">
+                          <input 
+                              type="number"
+                              className="val-input"
+                              value={customRoundCount}
+                              onChange={e => {
+                                  const v = parseInt(e.target.value);
+                                  if (!isNaN(v)) setCustomRoundCount(v);
+                              }}
+                              onBlur={e => {
+                                 const v = parseInt(e.target.value);
+                                 if (isNaN(v) || v < 1) setCustomRoundCount(1);
+                              }}
+                          />
+                      </div>
+                  </div>
+               )}
+            </div>
+
+            <div className="setting-section">
+               <div className="setting-row" style={{marginBottom: 8}}>
+                  <span style={{fontSize: '0.9rem', fontWeight: 600}}>游戏模式</span>
+               </div>
+               <div className="round-mode-selector">
+                  <button 
+                    className={`round-mode-btn ${pacingMode === 'standard' ? 'active' : ''}`}
+                    onClick={() => setPacingMode('standard')}
+                  >
+                    标准
+                  </button>
+                  <button 
+                    className={`round-mode-btn ${pacingMode === 'dynamic' ? 'active' : ''}`}
+                    onClick={() => setPacingMode('dynamic')}
+                  >
+                    动态间隔
+                  </button>
+                  <button 
+                    className={`round-mode-btn ${pacingMode === 'self-paced' ? 'active' : ''}`}
+                    onClick={() => setPacingMode('self-paced')}
+                  >
+                    手动 (空格)
+                  </button>
+               </div>
+            </div>
+
+            <div className="setting-section">
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>难度 (N)</span>
+                <div className="input-control">
+                  <button className="btn btn-secondary" style={{padding: '6px 10px'}} onClick={() => setN(Math.max(1, n - 1))}>-</button>
+                  <span className="val-display">{n}</span>
+                  <button className="btn btn-secondary" style={{padding: '6px 10px'}} onClick={() => setN(n + 1)}>+</button>
+                </div>
+              </div>
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>间隔 (秒)</span>
+                <div className="input-control">
+                  <button className="btn btn-secondary" style={{padding: '6px 10px'}} 
+                          onClick={() => setInterval(prev => Math.max(1.0, parseFloat((prev - 0.1).toFixed(1))))}>-</button>
+                  <input 
+                      type="number"
+                      className="val-input"
+                      value={interval}
+                      onChange={e => {
+                          const v = parseFloat(e.target.value);
+                          if (!isNaN(v) && v >= 0.1) setInterval(v);
+                      }}
+                      step="0.1"
+                  />
+                  <button className="btn btn-secondary" style={{padding: '6px 10px'}} 
+                          onClick={() => setInterval(prev => parseFloat((prev + 0.1).toFixed(1)))}>+</button>
+                </div>
+              </div>
+              {pacingMode === 'dynamic' && (
+                <div className="setting-row">
+                    <span style={{fontSize: '0.9rem', fontWeight: 600}}>显示实时时间</span>
+                    <label className="toggle-switch">
+                      <input type="checkbox" checked={showRealtimeInterval} onChange={e => setShowRealtimeInterval(e.target.checked)} />
+                      <span className="slider"></span>
+                    </label>
+                </div>
+              )}
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>显示时间 (秒)</span>
+                <div className="input-control">
+                  <button className="btn btn-secondary" style={{padding: '6px 10px'}} 
+                          onClick={() => setDisplayTime(prev => Math.max(0.1, parseFloat((prev - 0.1).toFixed(1))))}>-</button>
+                  <input 
+                      type="number"
+                      className="val-input"
+                      value={displayTime}
+                      onChange={e => {
+                          const v = parseFloat(e.target.value);
+                          if (!isNaN(v) && v >= 0.1) setDisplayTime(v);
+                      }}
+                      step="0.1"
+                  />
+                  <button className="btn btn-secondary" style={{padding: '6px 10px'}} 
+                          onClick={() => setDisplayTime(prev => parseFloat((prev + 0.1).toFixed(1)))}>+</button>
+                </div>
+              </div>
+            </div>
+
+            <div className="setting-section">
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>启用中间格</span>
+                <label className="toggle-switch">
+                  <input type="checkbox" checked={useCenter} onChange={e => setUseCenter(e.target.checked)} disabled={isVariable} />
+                  <span className="slider"></span>
+                </label>
+              </div>
+              {isVariable && <div style={{fontSize: '0.75rem', color: '#f59e0b', marginTop: -8, marginBottom: 8}}>* Variable 模式强制禁用中间格 (用于显示数字)</div>}
+
+              <div className="setting-row">
+                <span style={{fontSize: '0.9rem', fontWeight: 600}}>Variable 模式</span>
+                <label className="toggle-switch">
+                  <input type="checkbox" checked={isVariable} onChange={e => setIsVariable(e.target.checked)} />
+                  <span className="slider"></span>
+                </label>
+              </div>
+
+              {isVariable && (
+                <div style={{marginTop: 10, background: '#f8fafc', padding: 10, borderRadius: 8}}>
+                  <div style={{fontSize: '0.8rem', fontWeight: 600, color: '#64748b', marginBottom: 6}}>数字出现概率权重 (1 - {n})</div>
+                  <div style={{display: 'flex', flexWrap: 'wrap', gap: 8}}>
+                    {variableWeights.map((w, i) => (
+                      <div key={i} style={{display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
+                         <label style={{fontSize: '0.7rem', color: '#94a3b8'}}>{i + 1}</label>
+                         <input 
+                           className="prob-input"
+                           type="number" 
+                           value={w} 
+                           onChange={e => handleWeightChange(i, e.target.value)}
+                         />
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{fontSize: '0.7rem', color: '#94a3b8', marginTop: 6}}>当前平均难度: {calculateVariableDifficulty()}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {showSummary && lastResult && renderSummary(lastResult)}
+
+      {/* History Modal */}
+      {showHistory && (
+        <div className="modal-overlay" onClick={() => setShowHistory(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20}}>
+              <h2 style={{margin: 0, fontSize: '1.25rem'}}>记录</h2>
+              <button style={{background: 'none', border: 'none', color: '#64748b', cursor: 'pointer'}} onClick={() => setShowHistory(false)}>
+                <X />
+              </button>
+            </div>
+            
+            {/* Search / Analysis Filter */}
+            <div style={{marginBottom: 16, background: '#f8fafc', padding: 12, borderRadius: 12, border: '1px solid #e2e8f0'}}>
+                <div style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8}}>
+                    <Search size={16} color="#64748b" />
+                    <span style={{fontSize: '0.9rem', fontWeight: 600, color: '#475569'}}>筛选分析 (固定N)</span>
+                </div>
+                <div style={{display: 'flex', gap: 10}}>
+                    <input 
+                       type="number" 
+                       step="0.1"
+                       placeholder="输入N (如 2.5)" 
+                       value={searchN}
+                       onChange={e => setSearchN(e.target.value)}
+                       style={{padding: '8px', borderRadius: 8, border: '1px solid #cbd5e1', width: '100%', fontSize: '0.9rem'}}
+                    />
+                </div>
+            </div>
+
+            {/* Analysis Area: Chart + List */}
+            {statsData && statsData.length > 0 && (
+                <div style={{marginBottom: 20}}>
+                    <div style={{fontSize: '0.85rem', fontWeight: 600, color: '#475569', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6}}>
+                         <Activity size={16} /> 准确率趋势 (N={searchN})
+                    </div>
+                    
+                    {/* Line Chart */}
+                    <LineChart data={statsData} />
+
+                    {/* Data List */}
+                    <div style={{background: '#f1f5f9', borderRadius: 8, padding: 8, maxHeight: '120px', overflowY: 'auto'}}>
+                        {statsData.map((d, i) => (
+                           <div key={i} className="data-list-row">
+                               <span>{d.day}</span>
+                               <span style={{fontWeight: 700, color: d.avgAcc >= 80 ? '#16a34a' : '#334155'}}>{d.avgAcc}%</span>
+                           </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+            
+            {Object.keys(groupedHistory).length === 0 ? (
+              <div style={{textAlign: 'center', padding: '30px 0', color: '#94a3b8'}}>
+                <AlertCircle size={40} style={{margin: '0 auto 10px', opacity: 0.5}} />
+                <p>暂无符合条件的记录</p>
+              </div>
+            ) : (
+              <div style={{display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10, borderTop: '1px solid #e2e8f0', paddingTop: 20}}>
+                {Object.keys(groupedHistory).sort((a,b) => new Date(b).getTime() - new Date(a).getTime()).map(dateStr => (
+                    <HistoryDayGroup 
+                        key={dateStr}
+                        dateStr={dateStr}
+                        records={groupedHistory[dateStr]}
+                        onToggle={() => toggleDay(dateStr)}
+                        isExpanded={!!expandedDays[dateStr]}
+                    />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Milestones Modal */}
+      {showMilestones && (
+        <div className="modal-overlay" onClick={() => setShowMilestones(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20}}>
+              <h2 style={{margin: 0, fontSize: '1.25rem'}}>修仙路</h2>
+              <button style={{background: 'none', border: 'none', color: '#64748b', cursor: 'pointer'}} onClick={() => setShowMilestones(false)}>
+                <X />
+              </button>
+            </div>
+            
+            {milestones.length === 0 ? (
+              <div style={{textAlign: 'center', padding: '30px 0', color: '#94a3b8'}}>
+                <Scroll size={40} style={{margin: '0 auto 10px', opacity: 0.5}} />
+                <p>大道漫漫，始于足下</p>
+              </div>
+            ) : (
+              <div>
+                {milestones.slice().reverse().map(m => (
+                  <div key={m.id} className={`milestone-item ${m.type}`}>
+                    <div className="milestone-date">
+                       <span>{formatDateTime(m.timestamp)}</span>
+                    </div>
+                    <div className="milestone-title">{m.title}</div>
+                    <div className="milestone-desc">{m.description.replace(/&ge;/g, '≥')}</div>
+                    <div className="milestone-meta">
+                      {m.stageDuration !== undefined && <span>此阶耗时: {formatDuration(m.stageDuration)}</span>}
+                      {m.totalDuration !== undefined && <span>累计修炼: {formatDuration(m.totalDuration)}</span>}
+                      {m.stageSessions !== undefined && <span>本阶练习: {m.stageSessions}次</span>}
+                      {m.totalSessions !== undefined && <span>累计练习: {m.totalSessions}次</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const container = document.getElementById('root');
+const root = createRoot(container!);
+root.render(<Game />);
